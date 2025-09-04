@@ -1,0 +1,5 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\OverLab.Api\OverLab.Api.csproj" />
+  </ItemGroup>
+</Project>

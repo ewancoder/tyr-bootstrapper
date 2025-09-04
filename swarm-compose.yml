@@ -1,0 +1,117 @@
+networks:
+  internet:
+  local:
+    name: swarm-${PREFIX}overlab-local-internal
+    attachable: true # So that we can attach to the database for deployment.
+    driver: overlay
+    internal: true
+  public:
+    name: tyr-proxy-internal
+    driver: overlay
+    external: true
+  infra:
+    name: tyr-infrastructure-internal
+    driver: overlay
+    external: true
+  admin:
+    name: tyr-administration-internal
+    driver: overlay
+    external: true
+
+services:
+  postgres:
+    image: postgres:17
+    volumes:
+      - /data/${VOLUME_ROOT}/postgres:/var/lib/postgresql/data
+    ports:
+      - ${POSTGRES_PORT}
+    restart: unless-stopped
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - local
+      #- admin    # Disabled in production until needed.
+      #- internet # Needed for development env to expose ports to host.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 70m
+      placement:
+        constraints:
+          - ${SWARM_INFRA_CONSTRAINT}
+
+  cache:
+    image: valkey/valkey
+    command: valkey-server --save 60 1
+    restart: unless-stopped
+    ports:
+      - ${CACHE_PORT}
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    healthcheck:
+      test: [ "CMD", "valkey-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - local
+      #- admin    # Disabled in production until needed.
+      #- internet # Needed for development env to expose ports to host.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 20m
+      placement:
+        constraints:
+          - ${SWARM_INFRA_CONSTRAINT}
+
+  api:
+    image: ghcr.io/ewancoder/overlab-api:${API_TAG}
+    volumes:
+      - /root/dp.pfx:/app/dp.pfx
+    restart: unless-stopped
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    environment:
+      - HEALTHCHECK_URI=http://localhost:8080/health
+    networks:
+      - local
+      - public
+      - infra
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: ${API_REPLICAS}
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 70m
+      placement:
+        constraints:
+          - ${SWARM_SERVICE_CONSTRAINT}
+
+  web:
+    image: ghcr.io/ewancoder/overlab-web:${WEB_TAG}
+    restart: unless-stopped
+    networks:
+      - public
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: ${WEB_REPLICAS}
+      resources:
+        limits:
+          memory: 100m
+        reservations:
+          memory: 20m
+      placement:
+        constraints:
+          - ${SWARM_SERVICE_CONSTRAINT}

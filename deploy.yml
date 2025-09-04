@@ -1,0 +1,902 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'develop'
+    tags:
+      - 'v*'
+
+env:
+  PROJECT_NAME: overlab
+  API_IMAGE: overlab-api
+  WEB_IMAGE: overlab-web
+  API_DOCKERFILE: apiFolder/OverLab.Api/Dockerfile
+  WEB_DOCKERFILE: webFolder/Dockerfile
+  REGISTRY: ghcr.io
+  BADGE_GIST_ID: 0184962696ef0364be7a3f491133f2f9
+  REPO_USER: ewancoder
+  CHECK_FETCH_DEPTH: 30
+  DOTNET_VERSION: '9.0.x'
+
+jobs:
+  check-changed-files:
+    name: Check changed files
+    runs-on: ubuntu-latest
+    outputs:
+      frontend_changed: ${{ steps.filter.outputs.frontend }}
+      backend_changed: ${{ steps.filter.outputs.backend }}
+      db_changed: ${{ steps.filter.outputs.db }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ env.CHECK_FETCH_DEPTH }}
+
+      # TODO: Filter out CURRENT deployment by deployment ID or by something, whech checking last deployment status.
+      - name: Check if files changed
+        id: filter
+        run: |
+          BEFORE_SHA="${{ github.event.before }}"
+          CURRENT_SHA=$(git rev-parse HEAD)
+          echo "Checking files:"
+          echo "BEFORE_SHA: $BEFORE_SHA"
+          echo "CURRENT_SHA: $CURRENT_SHA"
+          
+          BRANCH=$(echo "${{ github.ref }}" | sed 's#refs/heads/##')
+          LAST_RUN=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs?status=completed&branch=$BRANCH&per_page=2")
+          LAST_CONCLUSION=$(echo "$LAST_RUN" | jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[0].conclusion')
+          echo "Checking branch $BRANCH deployments"
+          echo "Conclusion is: $LAST_CONCLUSION"
+          echo "GitHub data: $LAST_RUN"
+          if [ "$LAST_CONCLUSION" != "null" ] && [ "$LAST_CONCLUSION" != "success" ]; then
+            echo "Last run failed on the current branch. Deploying everything."
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "backend=true" >> $GITHUB_OUTPUT
+            echo "db=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if [ "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_SHA" ]; then
+            echo "First time push. Deploying everything."
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "backend=true" >> $GITHUB_OUTPUT
+            echo "db=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if ! git diff --name-only $BEFORE_SHA HEAD > diff; then
+            echo "Git diff failed, falling back to deployment. Deploying everything."
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "backend=true" >> $GITHUB_OUTPUT
+            echo "db=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if grep -qE '^(.github/workflows)|(docker-compose)|(.env)|(swarm-compose)' diff; then
+            echo "Github deploy.yml has changed, deploying everything."
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "backend=true" >> $GITHUB_OUTPUT
+            echo "db=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if grep -q '^frontend/' diff; then
+            echo "Frontend files changed. Deploying frontend."
+            echo "frontend=true" >> $GITHUB_OUTPUT
+          fi
+          if grep -q '^backend/' diff; then
+            echo "Backend files changed. Deploying backend."
+            echo "backend=true" >> $GITHUB_OUTPUT
+          fi
+          if grep -q '^db/' diff; then
+            echo "DB files changed. Deploying database."
+            echo "db=true" >> $GITHUB_OUTPUT
+          fi
+
+  generate-todos:
+    name: Check TODOs
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check TODOs
+        run: |
+          CURRENT_SHA=$(git rev-parse HEAD)
+          echo "### Pending TODOs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          grep --exclude-dir=.git -rniE ".*//[[:space:]]*todo|.*#[[:space:]]TODO" | while IFS= read -r line; do
+            FILE=$(echo $line | awk -F: '{ print $1 }')
+            LINE_NUMBER=$(echo $line | awk -F: '{ print $2 }')
+            TODO=$(echo $line | awk -F: '{for(i=3;i<=NF;i++) printf "%s%s", $i, (i<NF ? ":" : "")}' | awk '{$1=$1; print}')
+            echo "- \`$TODO\`" >> $GITHUB_STEP_SUMMARY
+            echo "  > [$FILE](https://github.com/${{ github.repository }}/blob/$CURRENT_SHA/$FILE#L$LINE_NUMBER)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+          todos=$(grep --exclude-dir=.git -rniE ".*//[[:space:]]*todo|.*#[[:space:]]TODO" | wc -l)
+          echo TODOS_COUNT=$todos >> $GITHUB_ENV
+
+      # TODO: Consider adding icon/logo here.
+      - name: Create TODOs badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: ${{ env.PROJECT_NAME }}-todos-${{ github.ref_name }}.json
+          label: TODOs
+          message: ${{ env.TODOS_COUNT }}
+          color: '#7dcbff'
+
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    needs: check-changed-files
+    if: needs.check-changed-files.outputs.backend_changed == 'true'
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # TODO: Consider generating package.lock.json file and using cache for all setup-dotnet actions.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test solution
+        run: dotnet test --logger trx --logger html --results-directory tests --collect "XPlat Code Coverage" *.slnx
+        working-directory: backend
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: '!cancelled()'
+        with:
+          name: api-test-results
+          path: backend/tests/
+
+      - name: Create coverage report
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        if: '!cancelled()'
+        with:
+          filename: 'backend/tests/*/coverage.cobertura.xml'
+          badge: true
+          format: 'markdown'
+          output: 'both'
+          fail_below_min: true
+          thresholds: '0 80'
+
+      - name: Write coverage report to job summary
+        if: '!cancelled()'
+        run: |
+          cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
+          echo COVERAGE=$(cat code-coverage-results.md | awk -F'|' '{print $2}' | sed -n 's/.*\*\*\([0-9]*\)%.*/\1/p') >> $GITHUB_ENV
+
+      # TODO: Consider adding icon/logo here.
+      - name: Create coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        if: '!cancelled()'
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: ${{ env.API_IMAGE }}-coverage-${{ github.ref_name }}.json
+          label: API Coverage
+          message: ${{ env.COVERAGE }}%
+          valColorRange: ${{ env.COVERAGE }}
+          maxColorRange: 80
+          minColorRange: 0
+
+  test-api-mutation:
+    name: API mutation testing
+    runs-on: ubuntu-latest
+    needs: test-api
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install Stryker
+        run: dotnet tool install -g dotnet-stryker
+
+      - name: Mutation testing
+        run: dotnet stryker -O stryker
+        working-directory: backend
+
+      # TODO: Consider writing info to summary & badges.
+      - name: Upload mutation test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-mutation-test-results
+          path: backend/stryker/reports/mutation-report.html
+
+  test-api-sonarqube:
+    name: SonarQube static analysis
+    runs-on: ubuntu-latest
+    needs: test-api
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: 'zulu'
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache SonarQube Cloud packages
+        uses: actions/cache@v4
+        with:
+          path: ~/sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Cache SonarQube Cloud scanner
+        id: cache-sonar-scanner
+        uses: actions/cache@v4
+        with:
+          path: ./.sonar/scanner
+          key: ${{ runner.os }}-sonar-scanner
+          restore-keys: ${{ runner.os }}-sonar-scanner
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install SonarQube Cloud scanner
+        if: steps.cache-sonar-scanner.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ./.sonar/scanner
+          dotnet tool update dotnet-sonarscanner --tool-path ./.sonar/scanner
+
+      - name: SonarQube scan
+        env:
+          SONAR_TOKEN: ${{ secrets.API_SONAR_TOKEN }}
+        working-directory: backend
+        run: |
+          ../.sonar/scanner/dotnet-sonarscanner begin /k:"${{ env.REPO_USER }}_${{ env.PROJECT_NAME }}-api" /o:"${{ env.REPO_USER }}" /d:sonar.token="${{ secrets.API_SONAR_TOKEN }}" /d:sonar.host.url="https://sonarcloud.io"
+          rm *.sln
+          dotnet build
+          ../.sonar/scanner/dotnet-sonarscanner end /d:sonar.token="${{ secrets.API_SONAR_TOKEN }}"
+
+  build-api:
+    name: Build API
+    runs-on: ubuntu-latest
+    needs: test-api
+    outputs:
+      sha: ${{ steps.save.outputs.sha }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_USER }}/${{ env.API_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=semver,pattern={{raw}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha,format=long,prefix=sha-{{branch}}-
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: ./backend
+          file: ${{ env.API_DOCKERFILE }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Save SHA tag for deployment
+        id: save
+        run: |
+          SHA_TAG=$(echo "${{ steps.meta.outputs.tags }}" | grep "sha-" | cut -d':' -f2)
+          echo "Saving SHA tag: $SHA_TAG"
+          echo "sha=$SHA_TAG" >> $GITHUB_OUTPUT
+
+  test-web:
+    name: Test Web
+    runs-on: ubuntu-latest
+    needs: check-changed-files
+    if: needs.check-changed-files.outputs.frontend_changed == 'true'
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: frontend
+
+      - name: Test app
+        run: pnpm test --watch=false --browsers=ChromeHeadless --code-coverage
+        working-directory: frontend
+
+      - name: Write coverage report to job summary
+        if: '!cancelled()'
+        run: |
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          cat coverage/coverage.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo COVERAGE=$(cat coverage/coverage.txt | grep % | awk -F '[% ]+' '{ sum += $3; count++ } END { print sum/count }') >> $GITHUB_ENV
+        working-directory: frontend
+
+      # TODO: Consider adding icon/logo here.
+      - name: Create coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        if: '!cancelled()'
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: ${{ env.WEB_IMAGE }}-coverage-${{ github.ref_name }}.json
+          label: Web UI Coverage
+          message: ${{ env.COVERAGE }}%
+          valColorRange: ${{ env.COVERAGE }}
+          maxColorRange: 80
+          minColorRange: 0
+
+  test-web-mutation:
+    name: Web mutation testing
+    runs-on: ubuntu-latest
+    needs: test-web
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: frontend
+
+      - name: Mutation testing
+        run: pnpm exec stryker run
+        working-directory: frontend
+
+      # TODO: Consider writing info to summary & badges.
+      - name: Upload mutation test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-mutation-test-results
+          path: frontend/reports/mutation/mutation.html
+
+  test-web-sonarqube:
+    name: SonarQube static analysis
+    runs-on: ubuntu-latest
+    needs: test-web
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.WEB_SONAR_TOKEN }}
+        with:
+          projectBaseDir: frontend
+
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    needs: test-web
+    outputs:
+      sha: ${{ steps.save.outputs.sha }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set CONFIG_FILE based on environment
+        id: set-config
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "CONFIG_FILE=config.development.ts" >> $GITHUB_ENV
+          else
+            echo "CONFIG_FILE=config.production.ts" >> $GITHUB_ENV
+          fi
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_USER }}/${{ env.WEB_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=semver,pattern={{raw}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha,format=long,prefix=sha-{{branch}}-
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: ./frontend
+          file: ${{ env.WEB_DOCKERFILE }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CONFIG_FILE=${{ env.CONFIG_FILE }}
+
+      - name: Save SHA tag for deployment
+        id: save
+        run: |
+          SHA_TAG=$(echo "${{ steps.meta.outputs.tags }}" | grep "sha-" | cut -d':' -f2)
+          echo "Saving SHA tag: $SHA_TAG"
+          echo "sha=$SHA_TAG" >> $GITHUB_OUTPUT
+
+  # TODO: SCP doesn't delete old files during deployment - fix this.
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    needs: [check-changed-files, build-api, build-web]
+    if: |
+      false &&
+      always() && !cancelled() && !failure() &&
+      (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-'))) &&
+      (
+        needs.check-changed-files.outputs.backend_changed == 'true' ||
+        needs.check-changed-files.outputs.frontend_changed == 'true' ||
+        needs.check-changed-files.outputs.db_changed == 'true'
+      )
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          source: "db,docker-compose.yml,.env.prod"
+          target: /tmp/${{ env.PROJECT_NAME }}
+
+      - name: Deploy to DO
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DB_CHANGED: ${{ needs.check-changed-files.outputs.db_changed }}
+          API_SHA_TAG: ${{ needs.build-api.outputs.sha }}
+          WEB_SHA_TAG: ${{ needs.build-web.outputs.sha }}
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME
+          script: |
+            echo "DB_CHANGED: $DB_CHANGED"
+            echo "API_SHA_TAG: $API_SHA_TAG"
+            echo "WEB_SHA_TAG: $WEB_SHA_TAG"
+            echo "PROJECT_NAME: $PROJECT_NAME"
+            cd /tmp/$PROJECT_NAME
+            mv .env.prod .env
+            sed -i "s/API_TAG=/API_TAG=$API_SHA_TAG/g" .env
+            sed -i "s/WEB_TAG=/WEB_TAG=$WEB_SHA_TAG/g" .env
+            sed -i '/ports:/{N;d}' docker-compose.yml
+            DEPLOY_SERVICES=$(docker compose config --services)
+            if [ -z $API_SHA_TAG ]; then
+              echo "API will not be deployed."
+              DEPLOY_SERVICES=$(echo $DEPLOY_SERVICES | tr ' ' '\n' | grep -v '^api$' | tr '\n' ' ')
+            fi
+            if [ -z $WEB_SHA_TAG ]; then
+              echo "WEB will not be deployed."
+              DEPLOY_SERVICES=$(echo $DEPLOY_SERVICES | tr ' ' '\n' | grep -v '^web$' | tr '\n' ' ')
+            fi
+            docker compose pull
+            docker compose up -d postgres
+            if [ "$DB_CHANGED" == "true" ]; then
+              echo "Database has changed, deploying it."
+              NETWORK_NAME=$(docker compose config --format json | jq -r '.networks["local"].name')
+              docker compose stop api
+              docker run --rm \
+                --network $NETWORK_NAME \
+                -v /tmp/$PROJECT_NAME/db/migrations:/db/migrations \
+                --env-file /data/$PROJECT_NAME/secrets.env \
+                amacneil/dbmate:latest --wait up
+              if [ $? -ne 0 ]; then
+                echo "Migration failed, restarting old backend containers"
+                docker compose start api
+                exit 1
+              fi
+            fi
+            if [ -z $API_SHA_TAG ]; then
+              echo "API is not being deployed, restarting old container."
+              docker compose start api
+            fi
+            echo "Deploying the following services: $DEPLOY_SERVICES"
+            docker compose up -d $DEPLOY_SERVICES
+            docker compose cp .env doneman:/.env
+            docker compose cp docker-compose.yml doneman:/docker-compose.yml
+            docker compose restart doneman
+
+  deploy-swarm:
+    name: Deploy production to Swarm cluster
+    runs-on: ubuntu-latest
+    needs: [check-changed-files, build-api, build-web]
+    if: |
+      always() && !cancelled() && !failure() &&
+      (github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-'))) &&
+      (
+        needs.check-changed-files.outputs.backend_changed == 'true' ||
+        needs.check-changed-files.outputs.frontend_changed == 'true' ||
+        needs.check-changed-files.outputs.db_changed == 'true'
+      )
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          source: "db,swarm-compose.yml,.env.prod"
+          target: /tmp/${{ env.PROJECT_NAME }}
+
+      - name: Deploy to DO
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DB_CHANGED: ${{ needs.check-changed-files.outputs.db_changed }}
+          API_SHA_TAG: ${{ needs.build-api.outputs.sha }}
+          WEB_SHA_TAG: ${{ needs.build-web.outputs.sha }}
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME
+          script: |
+            echo "DB_CHANGED: $DB_CHANGED"
+            echo "API_SHA_TAG: $API_SHA_TAG"
+            echo "WEB_SHA_TAG: $WEB_SHA_TAG"
+            echo "PROJECT_NAME: $PROJECT_NAME"
+            cd /tmp/$PROJECT_NAME
+            mv .env.prod .env
+            if [ -z $API_SHA_TAG ]; then
+              API_SHA_TAG=$(docker service inspect overlab_api --pretty | grep image= | awk -F: '{print $2}')
+              echo "API did not change. Using $API_SHA_TAG tag."
+            fi
+            if [ -z $WEB_SHA_TAG ]; then
+              WEB_SHA_TAG=$(docker service inspect overlab_web --pretty | grep image= | awk -F: '{print $2}')
+              echo "WEB did not change. Using $WEB_SHA_TAG tag."
+            fi
+            sed -i "s/API_TAG=/API_TAG=$API_SHA_TAG/g" .env
+            sed -i "s/WEB_TAG=/WEB_TAG=$WEB_SHA_TAG/g" .env
+            sed -i '/ports:/{N;d}' swarm-compose.yml
+            export $(cat .env | xargs)
+            echo "Redeploying the stack"
+            # TODO: Do this only for first time deployment, otherwise do this only after DB deployment.
+            # We cannot call this twice during a deployment, or we need to wait till the first deployment finishes
+            #docker stack deploy overlab --compose-file swarm-compose.yml --detach=false
+            if [ "$DB_CHANGED" == "true" ]; then
+              echo "Database has changed, deploying it."
+              NETWORK_NAME=$(docker compose -f swarm-compose.yml config --format json | jq -r '.networks["local"].name')
+              #docker compose stop api
+              docker run --rm \
+                --network $NETWORK_NAME \
+                -v /tmp/$PROJECT_NAME/db/migrations:/db/migrations \
+                --env-file /data/$PROJECT_NAME/secrets.env \
+                amacneil/dbmate:latest --wait up
+              if [ $? -ne 0 ]; then
+                echo "Migration failed, restarting old backend containers"
+                # TODO: Rescale old services, do not update it.
+                docker stack deploy overlab --compose-file swarm-compose.yml --detach=false
+                #docker compose start api
+                exit 1
+              fi
+            fi
+            #if [ -z $API_SHA_TAG ]; then
+            #  echo "API is not being deployed, restarting old container."
+            #  docker compose start api
+            #fi
+            #echo "Deploying the following services: $DEPLOY_SERVICES"
+            #docker compose up -d $DEPLOY_SERVICES
+            #docker compose cp .env doneman:/.env
+            #docker compose cp docker-compose.yml doneman:/docker-compose.yml
+            #docker compose restart doneman
+            echo "Redeploying the stack"
+            docker stack deploy overlab --compose-file swarm-compose.yml --detach=false
+
+  deploy-develop:
+    name: Deploy development
+    runs-on: ubuntu-latest
+    needs: [check-changed-files, build-api, build-web]
+    if: |
+      always() && !cancelled() && !failure() &&
+      github.ref == 'refs/heads/develop' &&
+      (
+        needs.check-changed-files.outputs.backend_changed == 'true' ||
+        needs.check-changed-files.outputs.frontend_changed == 'true' ||
+        needs.check-changed-files.outputs.db_changed == 'true'
+      )
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST_DEV }}
+          username: ${{ secrets.USERNAME_DEV }}
+          passphrase: ${{ secrets.PASSWORD_DEV }}
+          key: ${{ secrets.KEY_DEV }}
+          port: ${{ secrets.PORT_DEV }}
+          source: "db,docker-compose.yml,.env.dev"
+          target: /tmp/dev-${{ env.PROJECT_NAME }}
+
+      - name: Deploy to DEV server
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DB_CHANGED: ${{ needs.check-changed-files.outputs.db_changed }}
+          API_SHA_TAG: ${{ needs.build-api.outputs.sha }}
+          WEB_SHA_TAG: ${{ needs.build-web.outputs.sha }}
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        with:
+          host: ${{ secrets.HOST_DEV }}
+          username: ${{ secrets.USERNAME_DEV }}
+          passphrase: ${{ secrets.PASSWORD_DEV }}
+          key: ${{ secrets.KEY_DEV }}
+          port: ${{ secrets.PORT_DEV }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME
+          script: |
+            echo "DB_CHANGED: $DB_CHANGED"
+            echo "API_SHA_TAG: $API_SHA_TAG"
+            echo "WEB_SHA_TAG: $WEB_SHA_TAG"
+            echo "PROJECT_NAME: $PROJECT_NAME"
+            cd /tmp/dev-$PROJECT_NAME
+            mv .env.dev .env
+            sed -i "s/API_TAG=/API_TAG=$API_SHA_TAG/g" .env
+            sed -i "s/WEB_TAG=/WEB_TAG=$WEB_SHA_TAG/g" .env
+            sed -i "s/#- admin/- admin/g" docker-compose.yml
+            sed -i "s/#- internet/- internet/g" docker-compose.yml
+            DEPLOY_SERVICES=$(docker compose config --services)
+            if [ -z $API_SHA_TAG ]; then
+              echo "API will not be deployed."
+              DEPLOY_SERVICES=$(echo $DEPLOY_SERVICES | tr ' ' '\n' | grep -v '^api$' | tr '\n' ' ')
+            fi
+            if [ -z $WEB_SHA_TAG ]; then
+              echo "WEB will not be deployed."
+              DEPLOY_SERVICES=$(echo $DEPLOY_SERVICES | tr ' ' '\n' | grep -v '^web$' | tr '\n' ' ')
+            fi
+            docker compose pull
+            docker compose up -d postgres
+            if [ "$DB_CHANGED" == "true" ]; then
+              echo "Database has changed, deploying it."
+              NETWORK_NAME=$(docker compose config --format json | jq -r '.networks["local"].name')
+              docker compose stop api
+              docker run --rm \
+                --network $NETWORK_NAME \
+                -v /tmp/dev-$PROJECT_NAME/db/migrations:/db/migrations \
+                --env-file /data/dev-$PROJECT_NAME/secrets.env \
+                amacneil/dbmate:latest --wait up
+              if [ $? -ne 0 ]; then
+                echo "Migration failed, restarting old backend containers"
+                docker compose start api
+                exit 1
+              fi
+            fi
+            if [ -z $API_SHA_TAG ]; then
+              echo "API is not being deployed, restarting old container."
+              docker compose start api
+            fi
+            echo "Deploying the following services: $DEPLOY_SERVICES"
+            docker compose up -d $DEPLOY_SERVICES
+            docker compose cp .env doneman:/.env
+            docker compose cp docker-compose.yml doneman:/docker-compose.yml
+            docker compose restart doneman
+
+  deploy-develop-swarm:
+    name: Deploy development in Swarm mode
+    runs-on: ubuntu-latest
+    needs: [check-changed-files, build-api, build-web]
+    if: |
+      false &&
+      always() && !cancelled() && !failure() &&
+      github.ref == 'refs/heads/develop' &&
+      (
+        needs.check-changed-files.outputs.backend_changed == 'true' ||
+        needs.check-changed-files.outputs.frontend_changed == 'true' ||
+        needs.check-changed-files.outputs.db_changed == 'true'
+      )
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          source: "db,swarm-compose.yml,.env.dev"
+          target: /tmp/dev-${{ env.PROJECT_NAME }}
+
+      - name: Deploy to DEV
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DB_CHANGED: ${{ needs.check-changed-files.outputs.db_changed }}
+          API_SHA_TAG: ${{ needs.build-api.outputs.sha }}
+          WEB_SHA_TAG: ${{ needs.build-web.outputs.sha }}
+          PROJECT_NAME: ${{ env.PROJECT_NAME }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          passphrase: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME
+          script: |
+            echo "DB_CHANGED: $DB_CHANGED"
+            echo "API_SHA_TAG: $API_SHA_TAG"
+            echo "WEB_SHA_TAG: $WEB_SHA_TAG"
+            echo "PROJECT_NAME: $PROJECT_NAME"
+            cd /tmp/dev-$PROJECT_NAME
+            mv .env.dev .env
+            if [ -z $API_SHA_TAG ]; then
+              API_SHA_TAG=$(docker service inspect dev-overlab_api --pretty | grep image= | awk -F: '{print $2}')
+              echo "API did not change. Using $API_SHA_TAG tag."
+            fi
+            if [ -z $WEB_SHA_TAG ]; then
+              WEB_SHA_TAG=$(docker service inspect dev-overlab_web --pretty | grep image= | awk -F: '{print $2}')
+              echo "WEB did not change. Using $WEB_SHA_TAG tag."
+            fi
+            sed -i "s/API_TAG=/API_TAG=$API_SHA_TAG/g" .env
+            sed -i "s/WEB_TAG=/WEB_TAG=$WEB_SHA_TAG/g" .env
+            sed -i "s/#- admin/- admin/g" docker-compose.yml
+            sed -i "s/#- internet/- internet/g" docker-compose.yml
+            export $(cat .env | xargs)
+            echo "Redeploying the stack"
+            # TODO: Do this only for first time deployment, otherwise do this only after DB deployment.
+            # We cannot call this twice during a deployment, or we need to wait till the first deployment finishes
+            #docker stack deploy dev-overlab --compose-file swarm-compose.yml --detach=false
+            if [ "$DB_CHANGED" == "true" ]; then
+              echo "Database has changed, deploying it."
+              NETWORK_NAME=$(docker compose -f swarm-compose.yml config --format json | jq -r '.networks["local"].name')
+              #docker compose stop api
+              docker run --rm \
+                --network $NETWORK_NAME \
+                -v /tmp/dev-$PROJECT_NAME/db/migrations:/db/migrations \
+                --env-file /data/dev-$PROJECT_NAME/secrets.env \
+                amacneil/dbmate:latest --wait up
+              if [ $? -ne 0 ]; then
+                echo "Migration failed, restarting old backend containers"
+                # TODO: Rescale old services, do not update it.
+                docker stack deploy dev-overlab --compose-file swarm-compose.yml --detach=false
+                #docker compose start api
+                exit 1
+              fi
+            fi
+            #if [ -z $API_SHA_TAG ]; then
+            #  echo "API is not being deployed, restarting old container."
+            #  docker compose start api
+            #fi
+            #echo "Deploying the following services: $DEPLOY_SERVICES"
+            #docker compose up -d $DEPLOY_SERVICES
+            #docker compose cp .env doneman:/.env
+            #docker compose cp docker-compose.yml doneman:/docker-compose.yml
+            #docker compose restart doneman
+            echo "Redeploying the stack"
+            docker stack deploy dev-overlab --compose-file swarm-compose.yml --detach=false

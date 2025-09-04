@@ -1,0 +1,49 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AnalysisMode>AllEnabledByDefault</AnalysisMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="System.Text.Json" />
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <PackageReference>
+      <PrivateAssets>compile</PrivateAssets>
+    </PackageReference>
+    <ProjectReference>
+      <PrivateAssets>compile</PrivateAssets>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>$(AssemblyName).Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <Choose>
+    <When Condition="$(MSBuildProjectName.EndsWith('.Tests'))">
+      <PropertyGroup>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
+      </PropertyGroup>
+      <ItemGroup>
+        <PackageReference Include="coverlet.collector" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" />
+        <PackageReference Include="xunit" />
+        <PackageReference Include="xunit.runner.visualstudio" />
+        <PackageReference Include="AutoFixture.Xunit2" />
+        <PackageReference Include="AutoFixture.AutoMoq" />
+        <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+        <Using Include="Xunit" />
+        <Using Include="AutoFixture" />
+        <Using Include="AutoFixture.Xunit2" />
+        <Using Include="AutoFixture.AutoMoq" />
+        <Using Include="Moq" />
+      </ItemGroup>
+    </When>
+  </Choose>
+</Project>

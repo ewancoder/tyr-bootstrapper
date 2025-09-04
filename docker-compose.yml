@@ -1,0 +1,106 @@
+name: ${PREFIX}overlab
+
+networks:
+  internet:
+  local:
+    name: ${PREFIX}overlab-local-internal
+    internal: true
+  public:
+    name: tyr-proxy-internal
+    driver: overlay
+    external: true
+  infra:
+    name: tyr-infrastructure-internal
+    driver: overlay
+    external: true
+  admin:
+    name: tyr-administration-internal
+    driver: overlay
+    external: true
+
+services:
+  doneman:
+    image: ewancoder/doneman:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    mem_limit: 100m
+    mem_reservation: 75m
+    environment:
+      - NETWORK_PATTERN=^tyr
+
+  api:
+    image: ghcr.io/ewancoder/overlab-api:${API_TAG}
+    #container_name: ${PREFIX}overlab-api
+    volumes:
+      - /root/dp.pfx:/app/dp.pfx
+    restart: unless-stopped
+    mem_limit: 1g
+    mem_reservation: 750m
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    environment:
+      - HEALTHCHECK_URI=http://localhost:8080/health
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - local
+      - public
+      - infra
+    deploy:
+      replicas: ${API_REPLICAS}
+
+  postgres:
+    image: postgres:17
+    container_name: ${PREFIX}overlab-postgres
+    volumes:
+      - /data/${VOLUME_ROOT}/postgres:/var/lib/postgresql/data
+    ports:
+      - ${POSTGRES_PORT}
+    restart: unless-stopped
+    mem_limit: 1g
+    mem_reservation: 750m
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - local
+      #- admin    # Disabled in production until needed.
+      #- internet # Needed for development env to expose ports to host.
+
+  cache:
+    image: valkey/valkey
+    container_name: ${PREFIX}overlab-cache
+    command: valkey-server --save 60 1
+    restart: unless-stopped
+    ports:
+      - ${CACHE_PORT}
+    mem_limit: 1g
+    mem_reservation: 750m
+    env_file:
+      - /data/${VOLUME_ROOT}/secrets.env
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - local
+      #- admin    # Disabled in production until needed.
+      #- internet # Needed for development env to expose ports to host.
+
+  web:
+    image: ghcr.io/ewancoder/overlab-web:${WEB_TAG}
+    #container_name: ${PREFIX}overlab-web
+    restart: unless-stopped
+    mem_limit: 1g
+    mem_reservation: 750m
+    networks:
+      - public
+    deploy:
+      replicas: ${WEB_REPLICAS}
