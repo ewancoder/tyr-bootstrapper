@@ -1,0 +1,33 @@
+name: test-dotnet-mutation
+inputs:
+  folder:
+    description: Working directory of .NET solution
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Install Stryker
+      shell: bash
+      run: dotnet tool install -g dotnet-stryker
+
+    - name: Mutation testing
+      shell: bash
+      run: dotnet stryker -O stryker
+      working-directory: api
+
+    # TODO: Consider writing info to summary & badges.
+    - name: Upload mutation test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: api-mutation-test-results
+        path: ${{ inputs.folder }}/stryker/reports/mutation-report.html
