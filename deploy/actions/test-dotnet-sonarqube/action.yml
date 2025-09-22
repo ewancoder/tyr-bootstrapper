@@ -1,0 +1,58 @@
+name: test-dotnet-sonarqube
+inputs:
+  sonarToken:
+    description: Sonar secret token
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+  steps:
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: 17
+        distribution: "zulu"
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Cache SonarQube Cloud packages
+      uses: actions/cache@v4
+      with:
+        path: ~/sonar/cache
+        key: ${{ runner.os }}-sonar
+        restore-keys: ${{ runner.os }}-sonar
+
+    - name: Cache SonarQube Cloud scanner
+      id: cache-sonar-scanner
+      uses: actions/cache@v4
+      with:
+        path: ./.sonar/scanner
+        key: ${{ runner.os }}-sonar-scanner
+        restore-keys: ${{ runner.os }}-sonar-scanner
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Install SonarQube Cloud scanner
+      shell: bash
+      if: steps.cache-sonar-scanner.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p ./.sonar/scanner
+        dotnet tool update dotnet-sonarscanner --tool-path ./.sonar/scanner
+
+    - name: SonarQube scan
+      shell: bash
+      env:
+        SONAR_TOKEN: ${{ inputs.sonarToken }}
+      working-directory: api
+      run: |
+        ../.sonar/scanner/dotnet-sonarscanner begin /k:"${{ env.REPO_USER }}_${{ env.PROJECT_NAME }}-api" /o:"${{ env.REPO_USER }}" /d:sonar.token="${{ inputs.sonarToken }}" /d:sonar.host.url="https://sonarcloud.io"
+        rm *.sln
+        dotnet build
+        ../.sonar/scanner/dotnet-sonarscanner end /d:sonar.token="${{ inputs.sonarToken }}"
