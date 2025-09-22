@@ -1,0 +1,65 @@
+name: test-dotnet
+inputs:
+  folder:
+    description: Working directory of .NET solution
+    required: true
+  gistSecret:
+    description: GIST secret for uploading badge status
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # TODO: Consider generating package.lock.json file and using cache for all setup-dotnet actions.
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Test solution
+      shell: bash
+      run: dotnet test --logger trx --logger html --results-directory tests --collect "XPlat Code Coverage" *.slnx
+      working-directory: ${{ inputs.folder }}
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: "!cancelled()"
+      with:
+        name: ${{ inputs.folder }}-test-results
+        path: ${{ inputs.folder }}/tests/
+
+    - name: Create coverage report
+      uses: irongut/CodeCoverageSummary@v1.3.0
+      if: "!cancelled()"
+      with:
+        filename: "${{ inputs.folder }}/tests/*/coverage.cobertura.xml"
+        badge: true
+        format: "markdown"
+        output: "both"
+        fail_below_min: true
+        thresholds: "0 80"
+
+    - name: Write coverage report to job summary
+      shell: bash
+      if: "!cancelled()"
+      run: |
+        cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY
+        echo COVERAGE=$(cat code-coverage-results.md | awk -F'|' '{print $2}' | sed -n 's/.*\*\*\([0-9]*\)%.*/\1/p') >> $GITHUB_ENV
+
+    # TODO: Consider adding icon/logo here.
+    - name: Create coverage badge
+      uses: schneegans/dynamic-badges-action@v1.7.0
+      if: "!cancelled()"
+      with:
+        auth: ${{ inputs.gistSecret }}
+        gistID: ${{ env.BADGE_GIST_ID }}
+        filename: ${{ env.API_IMAGE }}-coverage-${{ github.ref_name }}.json
+        label: API Coverage
+        message: ${{ env.COVERAGE }}%
+        valColorRange: ${{ env.COVERAGE }}
+        maxColorRange: 80
+        minColorRange: 0
