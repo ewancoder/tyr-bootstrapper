@@ -20,8 +20,8 @@ permissions:
 runs:
   using: composite
   steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    #- name: Checkout repository
+    #  uses: actions/checkout@v4
 
     # TODO: Consider generating package.lock.json file and using cache for all setup-dotnet actions.
     - name: Setup .NET
