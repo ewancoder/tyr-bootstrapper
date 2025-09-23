@@ -36,4 +36,3 @@ grep --exclude-dir=.git -rniE ".*//[[:space:]]*todo|.*#[[:space:]]TODO" | while 
         echo ""
     } >> "$GITHUB_STEP_SUMMARY"
 done
-
