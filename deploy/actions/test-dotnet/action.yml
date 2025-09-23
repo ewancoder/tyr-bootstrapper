@@ -1,7 +1,16 @@
+# Inputs:
+# - env.DOTNET_VERSION
+# - env.BADGE_GIST_ID
+# Outputs:
+# - Writes to GITHUB_STEP_SUMMARY
+# - env.COVERAGE (via GITHUB_ENV) - for internal use
 name: test-dotnet
 inputs:
   folder:
     description: Working directory of .NET solution
+    required: true
+  coverageId:
+    description: Coverage identifier for uploading GIST
     required: true
   gistSecret:
     description: GIST secret for uploading badge status
@@ -57,7 +66,7 @@ runs:
       with:
         auth: ${{ inputs.gistSecret }}
         gistID: ${{ env.BADGE_GIST_ID }}
-        filename: ${{ env.API_IMAGE }}-coverage-${{ github.ref_name }}.json
+        filename: ${{ inputs.coverageId }}-coverage-${{ github.ref_name }}.json
         label: API Coverage
         message: ${{ env.COVERAGE }}%
         valColorRange: ${{ env.COVERAGE }}

@@ -1,3 +1,5 @@
+# Inputs:
+# - env.DOTNET_VERSION
 name: test-dotnet-mutation
 inputs:
   folder:

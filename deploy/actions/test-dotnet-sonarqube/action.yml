@@ -1,3 +1,11 @@
+# Inputs:
+# - env.DOTNET_VERSION
+# - env.REPO_USER
+# - env.PROJECT_NAME
+# - runner.os
+# Outputs:
+# - Writes to GITHUB_STEP_SUMMARY
+# - env.COVERAGE (via GITHUB_ENV) - for internal use
 name: test-dotnet-sonarqube
 inputs:
   sonarToken:
