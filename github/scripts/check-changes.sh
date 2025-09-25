@@ -8,8 +8,10 @@
 #   GITHUB_API_URL - github API url, "${{ github.api_url }}"
 #   GITHUB_REF - current branch/tag, "${{ github.ref }}"
 
+# TODO: Filter out CURRENT deployment by deployment ID or by something, whech checking last deployment status.
+
 set -euo pipefail
-echo "check-changes.sh v1"
+echo "check-changes.sh v1.0"
 
 if [ $# -eq 0 ]; then
     echo "No modules provided."
@@ -71,7 +73,7 @@ if ! git diff --name-only "$PREVIOUS_SHA" HEAD > diff; then
 fi
 
 # Critical files
-if grep -qE '^(.github/workflows|docker-compose|.env|swarm-compose)' diff; then
+if grep -qE '^(.github|docker-compose|.env|swarm-compose)' diff; then
     echo "Critical workflow/config files changed. Deploying all modules."
     for module in "${modules[@]}"; do
         echo "$module=true" >> "$GITHUB_OUTPUT"
