@@ -1,0 +1,29 @@
+# Inputs:
+# - env.REPO_USER
+# - env.PROJECT_NAME
+# - runner.os
+name: test-angular-sonarqube
+inputs:
+  folder:
+    description: Working directory of Angular project
+    required: true
+  sonarToken:
+    description: Sonar secret token
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: SonarQube scan
+      uses: SonarSource/sonarqube-scan-action@v5
+      env:
+        SONAR_TOKEN: ${{ inputs.sonarToken }}
+      with:
+        projectBaseDir: ${{ inputs.folder }}

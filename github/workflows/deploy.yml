@@ -1,0 +1,248 @@
+# TODO: Add badge information on which version is currently deployed to which env.
+name: Deploy
+
+on:
+  push:
+    branches:
+      - "main"
+      - "develop"
+    tags:
+      - "v*"
+
+env:
+  PROJECT_NAME: aircaptain
+  API_IMAGE: aircaptain-api
+  WEB_IMAGE: aircaptain-web
+  API_DOCKERFILE: api/AirCaptain.Api/Dockerfile
+  WEB_DOCKERFILE: web/Dockerfile
+  REGISTRY: ghcr.io
+  BADGE_GIST_ID: 0184962696ef0364be7a3f491133f2f9
+  REPO_USER: ewancoder
+  CHECK_FETCH_DEPTH: 30
+  DOTNET_VERSION: "9.0.x"
+
+jobs:
+  check-changes:
+    name: Check changes
+    runs-on: ubuntu-latest
+    outputs:
+      web_changed: ${{ steps.filter.outputs.web }}
+      api_changed: ${{ steps.filter.outputs.api }}
+      db_changed: ${{ steps.filter.outputs.db }}
+      project_name: ${{ steps.envs.outputs.project_name }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ env.CHECK_FETCH_DEPTH }}
+
+      - name: Check changes
+        id: filter
+        run: ./.github/scripts/check-changes.sh web api db
+        env:
+          PREVIOUS_SHA: ${{ github.event.before }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_API_URL: ${{ github.api_url }}
+
+      # We need this hack to use env variables in the sub workflows.
+      - name: Set environment variables
+        id: envs
+        run: echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+
+  generate-todos:
+    name: Check TODOs
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check TODOs
+        run: ./.github/scripts/list-todos.sh
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      # TODO: Consider adding icon/logo here.
+      - name: Create TODOs badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ env.BADGE_GIST_ID }}
+          filename: ${{ env.PROJECT_NAME }}-todos-${{ github.ref_name }}.json
+          label: TODOs
+          message: ${{ env.TODOS_COUNT }}
+          color: "#7dcbff"
+
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    needs: check-changes
+    if: needs.check-changes.outputs.api_changed == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test API
+        uses: ./.github/actions/test-dotnet
+        with:
+          folder: api
+          coverageId: ${{ env.API_IMAGE }}
+          gistSecret: ${{ secrets.GIST_SECRET }}
+
+  test-api-mutation:
+    name: API mutation testing
+    runs-on: ubuntu-latest
+    needs: test-api
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: API mutation testing
+        uses: ./.github/actions/test-dotnet-mutation
+        with:
+          folder: api
+
+  test-api-sonarqube:
+    name: SonarQube static analysis
+    runs-on: ubuntu-latest
+    needs: test-api
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: API Sonar analysis
+        uses: ./.github/actions/test-dotnet-sonarqube
+        with:
+          sonarToken: ${{ secrets.API_SONAR_TOKEN }}
+
+  build-api:
+    name: Build API
+    runs-on: ubuntu-latest
+    needs: test-api
+    outputs:
+      sha: ${{ steps.save.outputs.sha }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and Push docker image
+        uses: ./.github/actions/build-dotnet
+        with:
+          folder: api
+          imageName: ${{ env.API_IMAGE }}
+          dockerFile: ${{ env.API_DOCKERFILE }}
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  test-web:
+    name: Test Web
+    runs-on: ubuntu-latest
+    needs: check-changes
+    if: needs.check-changes.outputs.web_changed == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Web
+        uses: ./.github/actions/test-angular
+        with:
+          folder: web
+          coverageId: ${{ env.WEB_IMAGE }}
+          gistSecret: ${{ secrets.GIST_SECRET }}
+
+  test-web-mutation:
+    name: Web mutation testing
+    runs-on: ubuntu-latest
+    needs: test-web
+    if: false # Disable for now, doesn't work with Angular 20.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Web
+        uses: ./.github/actions/test-angular-mutation
+        with:
+          folder: web
+
+  test-web-sonarqube:
+    name: SonarQube static analysis
+    runs-on: ubuntu-latest
+    needs: test-web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test Web
+        uses: ./.github/actions/test-angular-sonarqube
+        with:
+          folder: web
+          sonarToken: ${{ secrets.WEB_SONAR_TOKEN }}
+
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    needs: test-web
+    outputs:
+      sha: ${{ steps.save.outputs.sha }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and Push docker image
+        uses: ./.github/actions/build-angular
+        with:
+          folder: web
+          imageName: ${{ env.WEB_IMAGE }}
+          dockerFile: ${{ env.WEB_DOCKERFILE }}
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
+  deployment:
+    name: Deploy
+    uses: ./.github/workflows/deployment.yml
+    needs: [check-changes, build-api, build-web]
+    if: |
+      always() && !cancelled() && !failure() &&
+      (
+        needs.check-changes.outputs.api_changed == 'true' ||
+        needs.check-changes.outputs.web_changed == 'true' ||
+        needs.check-changes.outputs.db_changed == 'true'
+      )
+    secrets:
+      # TODO: For non-swarm Dev deployment we need to pass HOST_DEV etc here.
+      # Hence, currently we only support Swarm deployments.
+      ssh_host: ${{ secrets.HOST }}
+      ssh_port: ${{ secrets.PORT }}
+      ssh_username: ${{ secrets.USERNAME }}
+      ssh_key: ${{ secrets.KEY }}
+      ssh_key_passphrase: ${{ secrets.PASSWORD }}
+    with:
+      # TODO: Unfortunately we cannot access environment variables here.
+      # So project_name value is duplicated.
+      project_name: ${{ needs.check-changes.outputs.project_name }}
+      db_changed: ${{ needs.check-changes.outputs.db_changed }}
+      api_sha_tag: ${{ needs.build-api.outputs.sha }}
+      web_sha_tag: ${{ needs.build-web.outputs.sha }}

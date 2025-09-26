@@ -1,0 +1,108 @@
+name: Deploy to environment
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        required: true
+        type: string
+      db_changed:
+        required: true
+        type: string
+      api_sha_tag:
+        required: true
+        type: string
+      web_sha_tag:
+        required: true
+        type: string
+    secrets:
+      ssh_host:
+        required: true
+      ssh_port:
+        required: true
+      ssh_username:
+        required: true
+      ssh_key:
+        required: true
+      ssh_key_passphrase:
+        required: true
+jobs:
+  deploy-production:
+    name: Production
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.ssh_host }}
+          port: ${{ secrets.ssh_port }}
+          username: ${{ secrets.ssh_username }}
+          key: ${{ secrets.ssh_key }}
+          passphrase: ${{ secrets.ssh_key_passphrase }}
+          source: "db,docker-compose.yml,.env.prod"
+          target: /tmp/${{ inputs.project_name }}_prod
+
+      - name: Deploy to Production
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          PROJECT_NAME: ${{ inputs.project_name }}
+          DB_CHANGED: ${{ inputs.db_changed }}
+          API_SHA_TAG: ${{ inputs.api_sha_tag }}
+          WEB_SHA_TAG: ${{ inputs.web_sha_tag }}
+          DEPLOYMENT_ENVIRONMENT: prod
+          DEPLOYMENT_IS_PRODUCTION: true
+          IS_SWARM: true # Change to false to switch to non-swarm mode.
+        with:
+          host: ${{ secrets.ssh_host }}
+          port: ${{ secrets.ssh_port }}
+          username: ${{ secrets.ssh_username }}
+          key: ${{ secrets.ssh_key }}
+          passphrase: ${{ secrets.ssh_key_passphrase }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME,DEPLOYMENT_ENVIRONMENT,DEPLOYMENT_IS_PRODUCTION,IS_SWARM
+          script_path: .github/scripts/deploy.sh
+
+  deploy-development:
+    name: Development
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.ssh_host }}
+          port: ${{ secrets.ssh_port }}
+          username: ${{ secrets.ssh_username }}
+          key: ${{ secrets.ssh_key }}
+          passphrase: ${{ secrets.ssh_key_passphrase }}
+          source: "db,docker-compose.yml,.env.dev"
+          target: /tmp/${{ inputs.project_name }}_dev
+
+      - name: Deploy to Development
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          PROJECT_NAME: ${{ inputs.project_name }}
+          DB_CHANGED: ${{ inputs.db_changed }}
+          API_SHA_TAG: ${{ inputs.api_sha_tag }}
+          WEB_SHA_TAG: ${{ inputs.web_sha_tag }}
+          DEPLOYMENT_ENVIRONMENT: dev
+          DEPLOYMENT_IS_PRODUCTION: false
+          IS_SWARM: true # Change to false to switch to non-swarm mode.
+        with:
+          host: ${{ secrets.ssh_host }}
+          port: ${{ secrets.ssh_port }}
+          username: ${{ secrets.ssh_username }}
+          key: ${{ secrets.ssh_key }}
+          passphrase: ${{ secrets.ssh_key_passphrase }}
+          envs: DB_CHANGED,API_SHA_TAG,WEB_SHA_TAG,PROJECT_NAME,DEPLOYMENT_ENVIRONMENT,DEPLOYMENT_IS_PRODUCTION,IS_SWARM
+          script_path: .github/scripts/deploy.sh

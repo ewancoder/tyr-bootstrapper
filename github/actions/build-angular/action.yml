@@ -1,0 +1,77 @@
+# Inputs:
+# - env.REGISTRY - ghcr registry
+# - env.REPO_USER
+# - github.actor - github username
+# Outputs:
+# - "$sha" variable is saved to GITHUB_OUTPUT for future use during deployment
+name: build-angular
+inputs:
+  folder:
+    description: Working directory of .NET solution
+    required: true
+  imageName:
+    description: Docker image name for this service
+    required: true
+  dockerFile:
+    description: Dockerfile name
+    required: true
+  githubToken:
+    description: GitHub token
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+  steps:
+    - name: Set CONFIG_FILE based on environment
+      shell: bash
+      id: set-config
+      # TODO: Make this configurable / move outside.
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          echo "CONFIG_FILE=config.development.ts" >> $GITHUB_ENV
+        else
+          echo "CONFIG_FILE=config.production.ts" >> $GITHUB_ENV
+        fi
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ inputs.githubToken }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.REPO_USER }}/${{ inputs.imageName }}
+        tags: |
+          type=ref,event=branch
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=ref,event=tag
+          type=semver,pattern={{raw}}
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern=v{{major}}
+          type=sha,format=long,prefix=sha-{{branch}}-
+
+    - name: Build and push Docker image
+      id: push
+      uses: docker/build-push-action@v6
+      with:
+        push: true
+        context: ./${{ inputs.folder }}
+        file: ${{ inputs.dockerFile }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          CONFIG_FILE=${{ env.CONFIG_FILE }}
+
+    - name: Save SHA tag for deployment
+      shell: bash
+      id: save
+      run: |
+        SHA_TAG=$(echo "${{ steps.meta.outputs.tags }}" | grep "sha-" | cut -d':' -f2)
+        echo "Saving SHA tag: $SHA_TAG"
+        echo "sha=$SHA_TAG" >> $GITHUB_OUTPUT

@@ -1,0 +1,66 @@
+# Inputs:
+# - env.BADGE_GIST_ID
+# Outputs:
+# - Writes to GITHUB_STEP_SUMMARY
+# - env.COVERAGE (via GITHUB_ENV) - for internal use
+name: test-angular
+inputs:
+  folder:
+    description: Working directory of Angular project
+    required: true
+  coverageId:
+    description: Coverage identifier for uploading GIST
+    required: true
+  gistSecret:
+    description: GIST secret for uploading badge status
+    required: true
+permissions:
+  contents: read
+runs:
+  using: composite
+  steps:
+    - name: Install pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: latest
+
+    - name: Install node
+      uses: actions/setup-node@v4
+      with:
+        node-version: latest
+        cache: "pnpm"
+        cache-dependency-path: ${{ inputs.folder }}/pnpm-lock.yaml
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install
+      working-directory: ${{ inputs.folder }}
+
+    - name: Test app
+      shell: bash
+      run: pnpm test --watch=false --browsers=ChromeHeadless --code-coverage
+      working-directory: ${{ inputs.folder }}
+
+    - name: Write coverage report to job summary
+      shell: bash
+      if: "!cancelled()"
+      run: |
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        cat coverage/coverage.txt >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo COVERAGE=$(cat coverage/coverage.txt | grep % | awk -F '[% ]+' '{ sum += $3; count++ } END { print sum/count }') >> $GITHUB_ENV
+      working-directory: ${{ inputs.folder }}
+
+    # TODO: Consider adding icon/logo here.
+    - name: Create coverage badge
+      uses: schneegans/dynamic-badges-action@v1.7.0
+      if: "!cancelled()"
+      with:
+        auth: ${{ inputs.gistSecret }}
+        gistID: ${{ env.BADGE_GIST_ID }}
+        filename: ${{ inputs.coverageId }}-coverage-${{ github.ref_name }}.json
+        label: Web UI Coverage
+        message: ${{ env.COVERAGE }}%
+        valColorRange: ${{ env.COVERAGE }}
+        maxColorRange: 80
+        minColorRange: 0
