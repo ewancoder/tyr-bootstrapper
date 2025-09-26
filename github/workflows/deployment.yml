@@ -45,7 +45,7 @@ jobs:
           username: ${{ secrets.ssh_username }}
           key: ${{ secrets.ssh_key }}
           passphrase: ${{ secrets.ssh_key_passphrase }}
-          source: "db,docker-compose.yml,.env.prod"
+          source: "db,docker-compose.yml,swarm-compose.yml,.env.prod"
           target: /tmp/${{ inputs.project_name }}_prod
 
       - name: Deploy to Production
@@ -85,7 +85,7 @@ jobs:
           username: ${{ secrets.ssh_username }}
           key: ${{ secrets.ssh_key }}
           passphrase: ${{ secrets.ssh_key_passphrase }}
-          source: "db,docker-compose.yml,.env.dev"
+          source: "db,docker-compose.yml,swarm-compose.yml,.env.dev"
           target: /tmp/${{ inputs.project_name }}_dev
 
       - name: Deploy to Development

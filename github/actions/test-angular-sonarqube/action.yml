@@ -1,7 +1,3 @@
-# Inputs:
-# - env.REPO_USER
-# - env.PROJECT_NAME
-# - runner.os
 name: test-angular-sonarqube
 inputs:
   folder:

@@ -18,6 +18,10 @@ inputs:
   githubToken:
     description: GitHub token
     required: true
+outputs:
+  sha:
+    description: SHA of the build commit for deployment
+    value: ${{ steps.save.outputs.sha }}
 permissions:
   contents: read
 runs:

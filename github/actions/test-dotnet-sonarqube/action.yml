@@ -1,6 +1,6 @@
 # Inputs:
 # - env.DOTNET_VERSION
-# - env.REPO_USER
+# - env.SONAR_ORG
 # - env.PROJECT_NAME
 # - runner.os
 # Outputs:
@@ -60,7 +60,7 @@ runs:
         SONAR_TOKEN: ${{ inputs.sonarToken }}
       working-directory: api
       run: |
-        ../.sonar/scanner/dotnet-sonarscanner begin /k:"${{ env.REPO_USER }}_${{ env.PROJECT_NAME }}-api" /o:"${{ env.REPO_USER }}" /d:sonar.token="${{ inputs.sonarToken }}" /d:sonar.host.url="https://sonarcloud.io"
+        ../.sonar/scanner/dotnet-sonarscanner begin /k:"${{ env.SONAR_ORG }}_${{ env.PROJECT_NAME }}-api" /o:"${{ env.SONAR_ORG }}" /d:sonar.token="${{ inputs.sonarToken }}" /d:sonar.host.url="https://sonarcloud.io"
         rm *.sln
         dotnet build
         ../.sonar/scanner/dotnet-sonarscanner end /d:sonar.token="${{ inputs.sonarToken }}"
